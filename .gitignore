@@ -1,0 +1,30 @@
+# Sirli ma'lumotlar
+.env
+.env.*
+*.env
+
+# Dependencies
+node_modules/
+
+# Loglar
+*.log
+logs/
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Yuklangan rasmlar (agar local'da saqlansa)
+uploads/
+public/uploads/
+src/uploads/
+
+# Backup va vaqtinchalik
+*.bak
+*.tmp
+backup/
