@@ -86,6 +86,11 @@ const questionSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    hasImage: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
     syncedAt: {
       type: Date,
       default: Date.now,
@@ -95,6 +100,14 @@ const questionSchema = new mongoose.Schema(
     timestamps: true,
   },
 );
+
+// hasImage'ni body'dan avtomatik hisoblash (har save'da)
+questionSchema.pre("save", function (next) {
+  if (this.isModified("body")) {
+    this.hasImage = (this.body || []).some((item) => item.type === 2);
+  }
+  next();
+});
 
 // Create compound index for questionId and langId (unique combination)
 questionSchema.index({ questionId: 1, langId: 1 }, { unique: true });
@@ -107,6 +120,9 @@ questionSchema.index({ "templates.id": 1 });
 
 // Compound index for template + langId queries
 questionSchema.index({ "templates.id": 1, langId: 1, status: 1 });
+
+// Imageless test uchun compound index
+questionSchema.index({ langId: 1, status: 1, hasImage: 1 });
 
 const Question = mongoose.model("Question", questionSchema);
 

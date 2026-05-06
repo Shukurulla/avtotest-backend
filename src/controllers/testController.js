@@ -129,29 +129,10 @@ export const startTest = asyncHandler(async (req, res, next) => {
     const questionCount = type === TEST_TYPES.IMAGELESS_20 ? 20 : 100;
     console.log(`🔍 Finding ${questionCount} imageless questions for lang ${langId}`);
 
-    // Aggregation pipeline: rasmi yo'q savollarni topish va random tanlash
+    // Pre-computed hasImage field + compound index ishlatadi (langId, status, hasImage)
     questions = await Question.aggregate([
-      { $match: { langId, status: 1 } },
-      // body arrayda type=2 (rasm) bor yoki yo'qligini tekshirish
-      {
-        $addFields: {
-          hasImage: {
-            $anyElementTrue: {
-              $map: {
-                input: '$body',
-                as: 'item',
-                in: { $eq: ['$$item.type', 2] }
-              }
-            }
-          }
-        }
-      },
-      // Faqat rasmi yo'q savollarni olish
-      { $match: { hasImage: false } },
-      // hasImage fieldni olib tashlash
-      { $project: { hasImage: 0 } },
-      // Random tanlash
-      { $sample: { size: questionCount } }
+      { $match: { langId, status: 1, hasImage: false } },
+      { $sample: { size: questionCount } },
     ]);
 
     console.log(`📊 Found ${questions.length} imageless questions`);

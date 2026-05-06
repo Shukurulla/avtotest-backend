@@ -30,6 +30,22 @@ export const invalidateTemplatesCache = () => {
   templatesCacheAt = 0;
 };
 
+const SESSION_CACHE_TTL_MS = 10 * 1000;
+const sessionCache = new Map();
+let sessionCacheAccesses = 0;
+
+const maybeCleanupSessionCache = () => {
+  if (++sessionCacheAccesses % 1000 !== 0) return;
+  const now = Date.now();
+  for (const [k, v] of sessionCache) {
+    if (v.expiresAt <= now) sessionCache.delete(k);
+  }
+};
+
+export const invalidateSessionCache = (odamId) => {
+  if (odamId) sessionCache.delete(odamId);
+};
+
 // ==================== ADMIN FUNCTIONS ====================
 
 // Get all error tracking users (admin) - faqat o'z yaratgan userlari
@@ -280,6 +296,7 @@ export const login = asyncHandler(async (req, res, next) => {
     createdAt: new Date(),
   };
   await user.save();
+  sessionCache.delete(odamId);
 
   res.json({
     success: true,
@@ -304,17 +321,33 @@ export const checkSession = asyncHandler(async (req, res) => {
     return res.json({ success: true, data: { valid: false } });
   }
 
+  maybeCleanupSessionCache();
+
+  const cached = sessionCache.get(odamId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return res.json({
+      success: true,
+      data: { valid: cached.sessionId === sessionId },
+    });
+  }
+
   const user = await ErrorTrackingUser.findOne({
     odamId,
     isActive: true,
-  }).select("currentSession");
+  })
+    .select("currentSession")
+    .lean();
 
-  if (!user || !user.currentSession?.sessionId) {
-    return res.json({ success: true, data: { valid: false } });
-  }
+  const realSessionId = user?.currentSession?.sessionId || null;
+  sessionCache.set(odamId, {
+    sessionId: realSessionId,
+    expiresAt: Date.now() + SESSION_CACHE_TTL_MS,
+  });
 
-  const valid = user.currentSession.sessionId === sessionId;
-  res.json({ success: true, data: { valid } });
+  res.json({
+    success: true,
+    data: { valid: realSessionId !== null && realSessionId === sessionId },
+  });
 });
 
 // Get test types
@@ -1624,28 +1657,9 @@ export const startImagelessTest = asyncHandler(async (req, res, next) => {
     `🔍 Finding ${questionCount} imageless questions for lang ${langId}`,
   );
 
-  // Aggregation pipeline: rasmi yo'q savollarni topish va random tanlash
+  // Pre-computed hasImage field + compound index ishlatadi (langId, status, hasImage)
   const questions = await Question.aggregate([
-    { $match: { langId, status: 1 } },
-    // body arrayda type=2 (rasm) bor yoki yo'qligini tekshirish
-    {
-      $addFields: {
-        hasImage: {
-          $anyElementTrue: {
-            $map: {
-              input: "$body",
-              as: "item",
-              in: { $eq: ["$$item.type", 2] },
-            },
-          },
-        },
-      },
-    },
-    // Faqat rasmi yo'q savollarni olish
-    { $match: { hasImage: false } },
-    // hasImage fieldni olib tashlash
-    { $project: { hasImage: 0 } },
-    // Random tanlash
+    { $match: { langId, status: 1, hasImage: false } },
     { $sample: { size: questionCount } },
   ]);
 
