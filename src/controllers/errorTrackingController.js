@@ -34,6 +34,9 @@ const SESSION_CACHE_TTL_MS = 10 * 1000;
 const sessionCache = new Map();
 let sessionCacheAccesses = 0;
 
+const EXAM_CACHE_TTL_MS = 2 * 60 * 1000;
+const examQuestionsCache = new Map();
+
 const maybeCleanupSessionCache = () => {
   if (++sessionCacheAccesses % 1000 !== 0) return;
   const now = Date.now();
@@ -50,27 +53,27 @@ export const invalidateSessionCache = (odamId) => {
 
 // Get all error tracking users (admin) - faqat o'z yaratgan userlari
 export const getUsers = asyncHandler(async (req, res) => {
-  // req.admin protectAdmin middleware orqali keladi
   const adminId = req.admin._id;
 
-  const users = await ErrorTrackingUser.find({ createdBy: adminId })
-    .select("-wrongQuestions -savedQuestions")
-    .sort({ createdAt: -1 });
-
-  // Get wrong questions count for each user
-  const usersWithCounts = await Promise.all(
-    users.map(async (user) => {
-      const userObj = user.toObject();
-      const fullUser = await ErrorTrackingUser.findById(user._id).select(
-        "wrongQuestions",
-      );
-      return {
-        ...userObj,
-        wrongQuestionsCount:
-          fullUser.wrongQuestions?.filter((q) => !q.learned)?.length || 0,
-      };
-    }),
-  );
+  // Aggregation: count'ni MongoDB'da hisoblab, og'ir arraylarni qaytarmaydi
+  const usersWithCounts = await ErrorTrackingUser.aggregate([
+    { $match: { createdBy: adminId } },
+    {
+      $addFields: {
+        wrongQuestionsCount: {
+          $size: {
+            $filter: {
+              input: { $ifNull: ["$wrongQuestions", []] },
+              as: "q",
+              cond: { $ne: ["$$q.learned", true] },
+            },
+          },
+        },
+      },
+    },
+    { $project: { wrongQuestions: 0, savedQuestions: 0 } },
+    { $sort: { createdAt: -1 } },
+  ]);
 
   res.json({
     success: true,
@@ -1227,58 +1230,63 @@ export const startSavedTest = asyncHandler(async (req, res, next) => {
 });
 
 // Get exam questions (top 20 most wrong questions from all users)
-export const getExamQuestions = asyncHandler(async (req, res, next) => {
-  const { langId } = req.query;
-  const targetLangId = parseInt(langId) || 1;
+// Eng ko'p xato qilingan top-20 savolni topish (aggregation, lean, cache)
+const computeTopWrongQuestions = async (targetLangId) => {
+  const cached = examQuestionsCache.get(targetLangId);
+  if (cached && cached.expiresAt > Date.now()) return cached.data;
 
-  // Aggregate to find most common wrong questions
-  const allUsers = await ErrorTrackingUser.find({ isActive: true });
+  // MongoDB ichida hisoblash — JS loop yo'q, butun userlar RAM'ga yuklanmaydi
+  const sorted = await ErrorTrackingUser.aggregate([
+    { $match: { isActive: true } },
+    { $unwind: "$wrongQuestions" },
+    { $match: { "wrongQuestions.langId": targetLangId } },
+    {
+      $group: {
+        _id: "$wrongQuestions.questionId",
+        count: { $sum: 1 },
+      },
+    },
+    { $sort: { count: -1 } },
+    { $limit: 20 },
+  ]);
 
-  // Count wrong questions frequency
-  const questionFrequency = {};
-
-  for (const user of allUsers) {
-    for (const wq of user.wrongQuestions || []) {
-      if (parseInt(wq.langId) === targetLangId) {
-        const key = `${wq.questionId}_${wq.langId}`;
-        questionFrequency[key] = (questionFrequency[key] || 0) + 1;
-      }
-    }
-  }
-
-  // Sort by frequency and get top 20
-  const sortedQuestions = Object.entries(questionFrequency)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 20)
-    .map(([key, count]) => {
-      const [questionId, langId] = key.split("_");
-      return {
-        questionId: parseInt(questionId),
-        langId: parseInt(langId),
-        errorCount: count,
-      };
-    });
-
-  if (sortedQuestions.length === 0) {
-    return res.json({
-      success: true,
-      count: 0,
+  if (sorted.length === 0) {
+    examQuestionsCache.set(targetLangId, {
       data: [],
+      expiresAt: Date.now() + EXAM_CACHE_TTL_MS,
     });
+    return [];
   }
 
-  // Get full question data
-  const questions = await Promise.all(
-    sortedQuestions.map(async ({ questionId, langId, errorCount }) => {
-      const q = await Question.findOne({ questionId, langId }).lean();
-      if (q) {
-        return { ...q, errorCount };
-      }
-      return null;
-    }),
-  );
+  const ids = sorted.map((s) => s._id);
+  const questionDocs = await Question.find({
+    questionId: { $in: ids },
+    langId: targetLangId,
+  }).lean();
 
-  const validQuestions = questions.filter(Boolean);
+  const byId = new Map(questionDocs.map((q) => [q.questionId, q]));
+  const result = sorted
+    .map((s) => {
+      const q = byId.get(s._id);
+      return q ? { ...q, errorCount: s.count } : null;
+    })
+    .filter(Boolean);
+
+  examQuestionsCache.set(targetLangId, {
+    data: result,
+    expiresAt: Date.now() + EXAM_CACHE_TTL_MS,
+  });
+  return result;
+};
+
+export const invalidateExamCache = (langId) => {
+  if (langId === undefined) examQuestionsCache.clear();
+  else examQuestionsCache.delete(langId);
+};
+
+export const getExamQuestions = asyncHandler(async (req, res) => {
+  const targetLangId = parseInt(req.query.langId) || 1;
+  const validQuestions = await computeTopWrongQuestions(targetLangId);
 
   res.json({
     success: true,
@@ -1301,51 +1309,16 @@ export const startExamTest = asyncHandler(async (req, res, next) => {
     }
   }
 
-  // Aggregate to find most common wrong questions
-  const allUsers = await ErrorTrackingUser.find({ isActive: true });
+  // Cache + aggregation orqali top-20 ni olish
+  const validQuestions = await computeTopWrongQuestions(targetLangId);
 
-  // Count wrong questions frequency
-  const questionFrequency = {};
-
-  for (const u of allUsers) {
-    for (const wq of u.wrongQuestions || []) {
-      if (parseInt(wq.langId) === targetLangId) {
-        const key = `${wq.questionId}_${wq.langId}`;
-        questionFrequency[key] = (questionFrequency[key] || 0) + 1;
-      }
-    }
-  }
-
-  // Sort by frequency and get top 20
-  const sortedQuestions = Object.entries(questionFrequency)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 20)
-    .map(([key]) => {
-      const [questionId, langId] = key.split("_");
-      return { questionId: parseInt(questionId), langId: parseInt(langId) };
-    });
-
-  if (sortedQuestions.length === 0) {
+  if (validQuestions.length === 0) {
     return next(
       new AppError(
         "Imtihon savollari topilmadi. Hech kim hali xato qilmagan.",
         400,
       ),
     );
-  }
-
-  // Get full question data
-  const questions = await Promise.all(
-    sortedQuestions.map(async ({ questionId, langId }) => {
-      const q = await Question.findOne({ questionId, langId }).lean();
-      return q;
-    }),
-  );
-
-  const validQuestions = questions.filter(Boolean);
-
-  if (validQuestions.length === 0) {
-    return next(new AppError("Imtihon savollari ma'lumotlari topilmadi", 400));
   }
 
   const startedAt = new Date();

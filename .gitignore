@@ -24,6 +24,9 @@ uploads/
 public/uploads/
 src/uploads/
 
+# Test rasmlari (server'da 1.4 GB — git'da bo'lmasligi kerak)
+images/
+
 # Backup va vaqtinchalik
 *.bak
 *.tmp
