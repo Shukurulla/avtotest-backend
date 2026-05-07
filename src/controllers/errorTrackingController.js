@@ -805,20 +805,20 @@ export const getWrongQuestions = asyncHandler(async (req, res, next) => {
     });
   }
 
-  // Get full question data for each wrong question
+  // Bitta queryda barcha savollarni olish (N ta findOne o'rniga 1 ta)
   const questionIds = unlearnedQuestions.map((wq) => ({
     questionId: wq.questionId,
     langId: wq.langId,
   }));
 
-  const questions = await Promise.all(
-    questionIds.map(async ({ questionId, langId }) => {
-      const q = await Question.findOne({ questionId, langId }).lean();
-      return q;
-    }),
-  );
+  const fetched = await Question.find({
+    $or: questionIds.map(({ questionId, langId }) => ({ questionId, langId })),
+  }).lean();
 
-  const validQuestions = questions.filter(Boolean);
+  const map = new Map(fetched.map((q) => [`${q.questionId}-${q.langId}`, q]));
+  const validQuestions = questionIds
+    .map((p) => map.get(`${p.questionId}-${p.langId}`))
+    .filter(Boolean);
 
   res.json({
     success: true,
@@ -1155,25 +1155,23 @@ export const getSavedQuestions = asyncHandler(async (req, res, next) => {
     });
   }
 
-  // Get full question data for each saved question
-  const questions = await Promise.all(
-    user.savedQuestions.map(async (sq) => {
-      const q = await Question.findOne({
-        questionId: sq.questionId,
-        langId: sq.langId,
-      }).lean();
-      if (q) {
-        return {
-          ...q,
-          savedIsCorrect: sq.isCorrect,
-          savedAt: sq.addedAt,
-        };
-      }
-      return null;
-    }),
-  );
+  // Bitta queryda barcha saqlangan savollarni olish (N ta findOne o'rniga 1 ta)
+  const fetched = await Question.find({
+    $or: user.savedQuestions.map((sq) => ({
+      questionId: sq.questionId,
+      langId: sq.langId,
+    })),
+  }).lean();
+  const qMap = new Map(fetched.map((q) => [`${q.questionId}-${q.langId}`, q]));
 
-  const validQuestions = questions.filter(Boolean);
+  const validQuestions = user.savedQuestions
+    .map((sq) => {
+      const q = qMap.get(`${sq.questionId}-${sq.langId}`);
+      return q
+        ? { ...q, savedIsCorrect: sq.isCorrect, savedAt: sq.addedAt }
+        : null;
+    })
+    .filter(Boolean);
 
   res.json({
     success: true,

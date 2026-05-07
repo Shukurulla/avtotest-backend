@@ -5,6 +5,15 @@ import Question from '../models/Question.js';
 import { LANGUAGES } from '../config/constants.js';
 import syncService from '../services/syncService.js';
 
+const TEMPLATES_CACHE_TTL_MS = 5 * 60 * 1000;
+let templatesCache = null;
+let templatesCacheAt = 0;
+
+export const invalidateAdminTemplatesCache = () => {
+  templatesCache = null;
+  templatesCacheAt = 0;
+};
+
 export const getUsers = asyncHandler(async (req, res) => {
   const users = await User.find({ isAdmin: false })
     .select('-password')
@@ -265,46 +274,57 @@ export const getStats = asyncHandler(async (req, res) => {
 });
 
 export const getTemplates = asyncHandler(async (req, res) => {
-  const templates = await Template.find({ status: 1 }).sort({ templateId: 1 });
+  if (templatesCache && Date.now() - templatesCacheAt < TEMPLATES_CACHE_TTL_MS) {
+    return res.json(templatesCache);
+  }
 
-  // For each template, count questions by language
-  const templatesWithCounts = await Promise.all(
-    templates.map(async (template) => {
-      const templateObj = template.toObject();
+  const templates = await Template.find({ status: 1 }).sort({ templateId: 1 }).lean();
+  const templateIds = templates.map((t) => t.templateId);
 
-      // Count questions for each language (1=Uzb lotin, 2=Rus, 3=Uzb kiril)
-      const [uzbekCount, russianCount, uzbekCyrillicCount] = await Promise.all([
-        Question.countDocuments({
-          'templates.id': template.templateId,
-          langId: LANGUAGES.UZBEK,
-          status: 1,
-        }),
-        Question.countDocuments({
-          'templates.id': template.templateId,
-          langId: LANGUAGES.RUSSIAN,
-          status: 1,
-        }),
-        Question.countDocuments({
-          'templates.id': template.templateId,
-          langId: LANGUAGES.CYRILLIC_UZBEK,
-          status: 1,
-        }),
-      ]);
-
-      return {
-        ...templateObj,
-        questionCounts: {
-          uzbek: uzbekCount,
-          russian: russianCount,
-          uzbekCyrillic: uzbekCyrillicCount,
+  const counts = await Question.aggregate([
+    { $match: { status: 1, 'templates.id': { $in: templateIds } } },
+    {
+      $project: {
+        langId: 1,
+        uniqueTemplateIds: {
+          $setUnion: [
+            { $map: { input: '$templates', as: 't', in: '$$t.id' } },
+            [],
+          ],
         },
-      };
-    })
-  );
+      },
+    },
+    { $unwind: '$uniqueTemplateIds' },
+    { $match: { uniqueTemplateIds: { $in: templateIds } } },
+    {
+      $group: {
+        _id: { template: '$uniqueTemplateIds', lang: '$langId' },
+        count: { $sum: 1 },
+      },
+    },
+  ]);
 
-  res.json({
+  const lookup = {};
+  for (const c of counts) {
+    if (!lookup[c._id.template]) lookup[c._id.template] = {};
+    lookup[c._id.template][c._id.lang] = c.count;
+  }
+
+  const templatesWithCounts = templates.map((t) => ({
+    ...t,
+    questionCounts: {
+      uzbek: lookup[t.templateId]?.[LANGUAGES.UZBEK] || 0,
+      russian: lookup[t.templateId]?.[LANGUAGES.RUSSIAN] || 0,
+      uzbekCyrillic: lookup[t.templateId]?.[LANGUAGES.CYRILLIC_UZBEK] || 0,
+    },
+  }));
+
+  templatesCache = {
     success: true,
     count: templatesWithCounts.length,
     data: templatesWithCounts,
-  });
+  };
+  templatesCacheAt = Date.now();
+
+  res.json(templatesCache);
 });

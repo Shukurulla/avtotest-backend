@@ -75,41 +75,56 @@ export const getUsers = asyncHandler(async (req, res, next) => {
     return next(new AppError("intensive_admin topilmadi", 404));
   }
 
-  const users = await ErrorTrackingUser.find({ createdBy: intensiveAdminId })
-    .select("-wrongQuestions -savedQuestions")
-    .sort({ createdAt: -1 })
-    .lean();
-
   const cutoff = new Date(Date.now() - MAX_TEST_DURATION_MS);
 
-  const usersWithStats = await Promise.all(
-    users.map(async (user) => {
-      const wrongCountDoc = await ErrorTrackingUser.findById(user._id).select(
-        "wrongQuestions"
-      );
-      const wrongQuestionsCount =
-        wrongCountDoc?.wrongQuestions?.filter((q) => !q.learned)?.length || 0;
+  // Aggregation: wrongQuestionsCount'ni MongoDB'da hisoblab, og'ir arraylar transferi yo'q
+  const users = await ErrorTrackingUser.aggregate([
+    { $match: { createdBy: intensiveAdminId } },
+    {
+      $addFields: {
+        wrongQuestionsCount: {
+          $size: {
+            $filter: {
+              input: { $ifNull: ["$wrongQuestions", []] },
+              as: "q",
+              cond: { $ne: ["$$q.learned", true] },
+            },
+          },
+        },
+        isOnline: {
+          $cond: [{ $ifNull: ["$currentSession.sessionId", false] }, true, false],
+        },
+      },
+    },
+    { $project: { wrongQuestions: 0, savedQuestions: 0 } },
+    { $sort: { createdAt: -1 } },
+  ]);
 
-      const isOnline = !!user.currentSession?.sessionId;
+  // Active test'larni bitta queryda olib, JS'da map qilish (N ta findOne o'rniga 1 ta find)
+  const odamIds = users.map((u) => u.odamId);
+  const activeTests = await ActiveTest.find({
+    odamId: { $in: odamIds },
+    status: "active",
+    startedAt: { $gte: cutoff },
+  })
+    .sort({ startedAt: -1 })
+    .lean();
 
-      // Faqat haqiqiy active test: status + vaqt filteri
-      const activeTest = await ActiveTest.findOne({
-        odamId: user.odamId,
-        status: "active",
-        startedAt: { $gte: cutoff },
-      })
-        .sort({ startedAt: -1 })
-        .lean();
+  const activeTestByOdamId = new Map();
+  for (const t of activeTests) {
+    if (!activeTestByOdamId.has(t.odamId)) {
+      activeTestByOdamId.set(t.odamId, t);
+    }
+  }
 
-      return {
-        ...user,
-        wrongQuestionsCount,
-        isOnline,
-        isTakingTest: !!activeTest,
-        activeTestType: activeTest?.testType || null,
-      };
-    })
-  );
+  const usersWithStats = users.map((user) => {
+    const activeTest = activeTestByOdamId.get(user.odamId);
+    return {
+      ...user,
+      isTakingTest: !!activeTest,
+      activeTestType: activeTest?.testType || null,
+    };
+  });
 
   res.json({
     success: true,

@@ -158,8 +158,10 @@ export const finishTopicTest = asyncHandler(async (req, res, next) => {
     return next(new AppError('Barcha maydonlar to\'ldirilishi shart', 400));
   }
 
-  // Verify user exists
-  const user = await ErrorTrackingUser.findOne({ odamId, isActive: true });
+  // Verify user exists (faqat kerakli fieldlarni olamiz, og'ir wrongQuestions massivini emas)
+  const user = await ErrorTrackingUser.findOne({ odamId, isActive: true })
+    .select('createdBy firstName lastName')
+    .lean();
   if (!user) {
     return next(new AppError('Foydalanuvchi topilmadi', 404));
   }
@@ -205,31 +207,58 @@ export const finishTopicTest = asyncHandler(async (req, res, next) => {
     passed,
   });
 
-  // Add wrong questions to user's wrongQuestions array
+  // Add wrong questions to user's wrongQuestions array (atomik bulkWrite)
   if (wrongQuestionIds.length > 0) {
+    const seen = new Set();
+    const ops = [];
+    const now = new Date();
+
     for (const wq of wrongQuestionIds) {
       const qId = parseInt(wq.questionId);
       const lId = parseInt(wq.langId);
+      const key = `${qId}-${lId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
 
-      const existingIndex = user.wrongQuestions.findIndex(
-        (q) => parseInt(q.questionId) === qId && parseInt(q.langId) === lId
-      );
-
-      if (existingIndex === -1) {
-        user.wrongQuestions.push({
-          questionId: qId,
-          langId: lId,
-          addedAt: new Date(),
-          testResultId: testResult._id,
-          learned: false,
-        });
-      } else if (user.wrongQuestions[existingIndex].learned) {
-        user.wrongQuestions[existingIndex].learned = false;
-        user.wrongQuestions[existingIndex].addedAt = new Date();
-        user.wrongQuestions[existingIndex].testResultId = testResult._id;
-      }
+      // 1) Mavjud yozuvni learned=true → false ga qaytarish (testResultId yangilanadi)
+      ops.push({
+        updateOne: {
+          filter: { odamId, isActive: true },
+          update: {
+            $set: {
+              'wrongQuestions.$[elem].learned': false,
+              'wrongQuestions.$[elem].addedAt': now,
+              'wrongQuestions.$[elem].testResultId': testResult._id,
+            },
+          },
+          arrayFilters: [
+            { 'elem.questionId': qId, 'elem.langId': lId, 'elem.learned': true },
+          ],
+        },
+      });
+      // 2) Yozuv yo'q bo'lsa qo'shish
+      ops.push({
+        updateOne: {
+          filter: {
+            odamId,
+            isActive: true,
+            wrongQuestions: { $not: { $elemMatch: { questionId: qId, langId: lId } } },
+          },
+          update: {
+            $push: {
+              wrongQuestions: {
+                questionId: qId,
+                langId: lId,
+                addedAt: now,
+                testResultId: testResult._id,
+                learned: false,
+              },
+            },
+          },
+        },
+      });
     }
-    await user.save();
+    await ErrorTrackingUser.bulkWrite(ops, { ordered: false });
   }
 
   // Update ActiveTest and emit socket event

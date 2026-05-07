@@ -311,25 +311,38 @@ export const getTemplatesWithQuestions = asyncHandler(async (req, res) => {
   const templates = await Template.find({ status: 1 })
     .sort({ templateId: 1 })
     .lean();
+  const templateIds = templates.map((t) => t.templateId);
 
-  // Get questions for each template
-  const templatesWithQuestions = await Promise.all(
-    templates.map(async (template) => {
-      const questions = await Question.find({
-        "templates.id": template.templateId,
-        langId: langId,
-        status: 1,
-      })
-        .select("questionId body answers imagePath answerDescription answerVideo")
-        .sort({ questionId: 1 })
-        .lean();
+  // Bitta query bilan barcha savollarni olish (62 ta query o'rniga 1 ta)
+  const allQuestions = await Question.find({
+    "templates.id": { $in: templateIds },
+    langId: langId,
+    status: 1,
+  })
+    .select(
+      "questionId body answers imagePath answerDescription answerVideo templates",
+    )
+    .sort({ questionId: 1 })
+    .lean();
 
-      return {
-        ...template,
-        questions,
-      };
-    })
-  );
+  // Savollarni template'lar bo'yicha guruhlash
+  const questionsByTemplate = new Map();
+  for (const tid of templateIds) questionsByTemplate.set(tid, []);
+  for (const q of allQuestions) {
+    const seenForThis = new Set();
+    for (const t of q.templates || []) {
+      if (questionsByTemplate.has(t.id) && !seenForThis.has(t.id)) {
+        seenForThis.add(t.id);
+        const { templates: _ignored, ...qWithoutTemplates } = q;
+        questionsByTemplate.get(t.id).push(qWithoutTemplates);
+      }
+    }
+  }
+
+  const templatesWithQuestions = templates.map((template) => ({
+    ...template,
+    questions: questionsByTemplate.get(template.templateId) || [],
+  }));
 
   res.json({
     success: true,
