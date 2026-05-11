@@ -573,17 +573,6 @@ export const submitAnswer = asyncHandler(async (req, res, next) => {
   const correctAnswer = question.answers.find((a) => a.check === 1);
   const isCorrect = correctAnswer && correctAnswer.id === answerId;
 
-  // [DEBUG] wrongQuestions logikasi nima sodir bo'layotganini ko'rish (single-line JSON)
-  console.log('[submitAnswer] ' + JSON.stringify({
-    odamId: odamId ?? null,
-    testType: testType ?? null,
-    isCorrect,
-    questionId,
-    langId,
-    answerId,
-    willSaveWrong: !isCorrect && !!odamId && testType !== 'internal',
-  }));
-
   // Xato javob bo'lsa, darhol wrongQuestions ga saqlash (ichki testdan tashqari)
   if (!isCorrect && odamId && testType !== 'internal') {
     const qId = parseInt(questionId);
@@ -704,6 +693,67 @@ export const finishTest = asyncHandler(async (req, res, next) => {
     completedAt,
     passed,
   });
+
+  // Xato javoblarni user.wrongQuestions ga atomik qo'shish (ichki testdan tashqari)
+  // Bu submitAnswer per-question chaqirilmagan holatlar uchun backup mexanizmi
+  if (testType !== 'internal') {
+    const seen = new Set();
+    const ops = [];
+    const now = new Date();
+
+    for (const q of questions) {
+      if (q.isCorrect) continue;
+      if (q.userAnswer === null || q.userAnswer === undefined) continue;
+      const qId = parseInt(q.questionId);
+      const lId = parseInt(q.langId);
+      if (Number.isNaN(qId) || Number.isNaN(lId)) continue;
+      const key = `${qId}-${lId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      // 1) Mavjud yozuvni learned=true → false ga qaytarish
+      ops.push({
+        updateOne: {
+          filter: { odamId, isActive: true },
+          update: {
+            $set: {
+              "wrongQuestions.$[elem].learned": false,
+              "wrongQuestions.$[elem].addedAt": now,
+              "wrongQuestions.$[elem].testResultId": testResult._id,
+            },
+          },
+          arrayFilters: [
+            { "elem.questionId": qId, "elem.langId": lId, "elem.learned": true },
+          ],
+        },
+      });
+      // 2) Yozuv yo'q bo'lsa — yangi qo'shish
+      ops.push({
+        updateOne: {
+          filter: {
+            odamId,
+            isActive: true,
+            wrongQuestions: { $not: { $elemMatch: { questionId: qId, langId: lId } } },
+          },
+          update: {
+            $push: {
+              wrongQuestions: {
+                questionId: qId,
+                langId: lId,
+                addedAt: now,
+                testResultId: testResult._id,
+                learned: false,
+              },
+            },
+          },
+        },
+      });
+    }
+
+    if (ops.length > 0) {
+      await ErrorTrackingUser.bulkWrite(ops, { ordered: false });
+    }
+  }
 
   // ActiveTest ni yangilash va socket event yuborish
   if (activeTestId) {
