@@ -573,6 +573,12 @@ export const submitAnswer = asyncHandler(async (req, res, next) => {
   const correctAnswer = question.answers.find((a) => a.check === 1);
   const isCorrect = correctAnswer && correctAnswer.id === answerId;
 
+  // [DEBUG] wrongQuestions logikasi nima sodir bo'layotganini ko'rish
+  console.log('[submitAnswer]', {
+    odamId, testType, isCorrect, questionId, langId, answerId,
+    willSaveWrong: !isCorrect && !!odamId && testType !== 'internal',
+  });
+
   // Xato javob bo'lsa, darhol wrongQuestions ga saqlash (ichki testdan tashqari)
   if (!isCorrect && odamId && testType !== 'internal') {
     const qId = parseInt(questionId);
