@@ -332,6 +332,19 @@ class SyncService {
         });
       }
 
+      const stripFilesPrefix = (items) => {
+        if (!Array.isArray(items)) return;
+        for (const it of items) {
+          if (it && typeof it.value === 'string' && it.value.startsWith('/files/')) {
+            it.value = it.value.replace(/^\/files/, '');
+          }
+        }
+      };
+      stripFilesPrefix(parsedBody);
+      if (Array.isArray(parsedAnswers)) {
+        parsedAnswers.forEach((a) => stripFilesPrefix(a && a.body));
+      }
+
       // Download image if exists
       let imagePath = null;
       const imageBody = parsedBody?.find((b) => b.type === 2);

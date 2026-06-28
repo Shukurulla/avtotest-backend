@@ -203,6 +203,7 @@ class EavtoService {
   async downloadImage(imageUrl, questionId) {
     try {
       // Check if image URL is relative
+      if (imageUrl && imageUrl.startsWith('/files/')) imageUrl = imageUrl.replace(/^\/files/, '');
       let fullUrl = imageUrl;
       if (imageUrl.startsWith('/')) {
         fullUrl = `http://back.eavtotalim.uz${imageUrl}`;
